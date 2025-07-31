@@ -7,19 +7,14 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/launcher"
 )
 
 func main() {
-
-	// login_url := "https://exampledata.cn/foundation/tps-local/b/#/login"
-	target_url := "https://exampledata.cn/jc/tps-local/b/#/addRequireSndl3Jx"
-	// wsURL := launcher.NewUserMode().Set("user-data-dir", "D:\\chrome_rod_usr_data").Leakless(false).MustLaunch()
-	// fmt.Println("wsURL:", wsURL)
-	// brower := rod.New().ControlURL(wsURL).MustConnect().NoDefaultDevice()
-
-	browser_url := "ws://127.0.0.1:37712/devtools/browser/81b8aa43-f2fd-47c5-b326-ee6b6debd8e2"
-	browser := rod.New().ControlURL(browser_url).MustConnect()
-	// page := browser.MustPage(target_url).MustWindowFullscreen()
+	target_url := "https://tps.ylbz.tj.gov.cn/jc/tps-local/b/#/addRequireSndl3Jx"
+	wsURL := launcher.NewUserMode().Set("user-data-dir", "D:\\chrome_rod_usr_data").Leakless(false).MustLaunch()
+	fmt.Println("wsURL:", wsURL)
+	browser := rod.New().ControlURL(wsURL).MustConnect().NoDefaultDevice()
 
 	page := browser.MustPage(target_url).MustWindowMaximize()
 
@@ -57,7 +52,7 @@ func main() {
 	writer := csv.NewWriter(file)
 
 	// 写入表头
-	writer.Write([]string{"品种名称", "制剂规格", "生产企业", "历史中选药品", "单位", "2023年历史采购量", "2024年历史采购量"})
+	writer.Write([]string{"品种名称;制剂规格;生产企业;历史中选药品;单位;2023年历史采购量;2024年历史采购量"})
 
 	// 写入数据
 	for _, row := range str_rows {
