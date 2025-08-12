@@ -13,5 +13,10 @@ tasks:
 
   run:
     cmds:
+      - go run cmd/go-get-data/main.go .
+    silent: true
+
+  run-trace:
+    cmds:
       - go run cmd/go-get-data/main.go . -rod="show,slow=1s,trace"
     silent: true
