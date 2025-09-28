@@ -3,15 +3,45 @@ package main
 import (
 	"bufio"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/xuri/excelize/v2"
 )
+
+type Command struct {
+	Desc string
+	Run  func(*rod.Browser, bool)
+}
+
+var reader *bufio.Reader
+var sWsUrl string
+var sFilePath string
+var sMaxProductNum int = 0
+var sIndex int = 0
+var sSearchResultPath string = `table > tbody > tr[class="ui-widget-content jqgrow ui-row-ltr"]`
+
+type Product struct {
+	index         int     // "序号",
+	code          string  // "药品编码",
+	name          string  // "药品名称",
+	maker         string  // "生产厂家",
+	supplier      string  // "供货商",
+	spec          string  // "规格",
+	num           int     // "数量",
+	unit          string  // "单位",
+	price         float32 // "进价",
+	approval_code string  // "批准文号",
+	platformCode  string  // "平台产品编号",
+}
 
 func newFunction(page *rod.Page, str_rows *[]string) {
 	table_selector := "//*[@id=\"app\"]/div[1]/div[2]/section/div/div[2]/div[1]/div[1]/div[3]/table/tbody"
@@ -258,19 +288,193 @@ func getSmpaaData(browser *rod.Browser, skipNav bool) {
 	}
 }
 
-type Command struct {
-	Desc string
-	Run  func(*rod.Browser, bool)
+func reportData(browser *rod.Browser, skipNav bool) {
+
+	var page *rod.Page
+	pages, _ := browser.Pages()
+	if len(pages) > 0 {
+		page = pages[0]
+	} else {
+		page = browser.MustPage()
+		fmt.Println("请手动打开你想要的目标页面。完成后按回车继续。")
+		fmt.Scanln()
+	}
+	page.MustWindowMaximize()
+	iframeMain := page.MustElement("iframe#mainframe").MustFrame()
+
+	f1, err := excelize.OpenFile(sFilePath)
+	if err != nil {
+		log.Fatal("读取 file1 失败")
+		return
+	}
+
+	sheet1 := "Sheet1"
+	rowsA, _ := f1.GetRows(sheet1)
+	rowStringArray := [][]string{}
+
+	for i, row := range rowsA {
+		// 第一行是表头
+		if i == 0 {
+			continue
+		}
+
+		if sIndex > 0 {
+			if i == sIndex {
+				rowStringArray = append(rowStringArray, row)
+				break
+			}
+		} else {
+			if sMaxProductNum > 0 && i > sMaxProductNum {
+				break
+			}
+			rowStringArray = append(rowStringArray, row)
+		}
+	}
+	fmt.Println("读取到的行数:", len(rowStringArray))
+	// 需要一个变量来记录平均耗时
+	var totalDuration time.Duration = 0
+
+	for index, row := range rowStringArray {
+		func(index int, row []string) {
+			beginTime := time.Now()
+
+			// 计算耗时
+			defer func() {
+				duration := time.Since(beginTime)
+				totalDuration += duration
+
+				averageDuration := totalDuration / time.Duration(index+1)
+				fmt.Printf("平均每条耗时: %v, 预计剩余时间: %v\n", averageDuration, averageDuration*time.Duration(len(rowStringArray)))
+			}()
+
+			var product Product
+			// assign values to product fields
+			fmt.Sscanf(row[0], "%d", &product.index)
+			product.code = row[1]
+			product.name = row[2]
+			product.maker = row[3]
+			product.supplier = row[4]
+			product.spec = row[5]
+			// convert string to int
+			fmt.Sscanf(row[6], "%d", &product.num)
+			product.unit = row[7]
+			fmt.Sscanf(row[8], "%f", &product.price)
+			product.approval_code = row[9]
+			product.platformCode = row[10]
+
+			fmt.Printf("开始添加商品, 序号: %d, 药品名称: %s, 产品编号: %s, 采购数量: %d, 采购价格: %f. 供应商: %s\n", product.index, product.name, product.code, product.num, product.price, product.supplier)
+
+			// 带量采购
+			iframeMain.MustElementR("a", "带量采购").MustClick()
+			iframeMain.MustWaitStable()
+
+			iframeMain.MustElementR("button", "清空").MustClick()
+
+			// 更多
+			has, elem, err := iframeMain.Has("#searchForm > div:nth-child(4) > div.moreButton")
+			if err == nil && has && elem.MustText() == "更多" {
+				elem.MustClick()
+			}
+
+			iframeMain.MustElementX("//*[@id=\"goodsId\"]").MustInput(product.platformCode)
+			iframeMain.MustElementX("//*[@id=\"search1\"]").MustClick()
+			iframeMain.MustWaitStable()
+
+			has, elem, err = iframeMain.Has(sSearchResultPath)
+			if err != nil {
+				fmt.Println("[带量采购] 搜索错误:", err)
+				return
+			}
+
+			if has {
+				fmt.Println("[带量采购] 搜索到结果")
+				elem.MustElement(`td > input[name="buyNum"]`).MustInput(strconv.Itoa(product.num))
+				priceText := trimPriceString(elem.MustElement(`td[aria-describedby="gridlist_contractPriceInfo"]`).MustText())
+				fmt.Println("价格:", priceText)
+
+				// elem.MustElement(`td > input[name="buyNum"]`).MustInput("100")
+				// elem.MustElement(`td > input[name="buyNum"]`).MustInput("100")
+
+				elem.MustElement(`td[aria-describedby="gridlist_cb"] > input[class="cbox"]`).MustClick()
+				iframeMain.MustElementR("button", "加入订单").MustClick()
+
+				return
+
+			} else {
+				fmt.Println("[带量采购] 未搜索到结果")
+			}
+
+			// 普通采购
+			iframeMain.MustElementR("a", "普通采购").MustClick()
+			iframeMain.MustWaitStable()
+
+			iframeMain.MustElementX("//*[@id=\"clear\"]").MustClick()
+			iframeMain.MustElementX("//*[@id=\"procurecatalogId\"]").MustInput(product.platformCode)
+			iframeMain.MustElementX("//*[@id=\"search1\"]").MustClick()
+			iframeMain.MustWaitStable()
+
+			has, elem, err = iframeMain.Has(sSearchResultPath)
+			if err != nil {
+				fmt.Println("[普通采购] 搜索错误:", err)
+				return
+			}
+			if has {
+				fmt.Println("[普通采购] 搜索到结果")
+				elem.MustElement(`td > input[name="buyNum"]`).MustInput(strconv.Itoa(product.num))
+				priceText := trimPriceString(elem.MustElement(`td[aria-describedby="gridlist_contractPriceInfo"]`).MustText())
+				fmt.Println("价格:", priceText)
+				elem.MustElement(`td[aria-describedby="gridlist_cb"] > input[class="cbox"]`).MustClick()
+				iframeMain.MustElementR("button", "加入订单").MustClick()
+			} else {
+				fmt.Println("[普通采购] 未搜索到结果")
+			}
+		}(index, row)
+	}
+}
+
+func trimPriceString(priceText string) string {
+	priceText = strings.TrimPrefix(priceText, "￥")
+	priceText = strings.ReplaceAll(priceText, ",", "")
+	priceText = strings.TrimRight(priceText, "0")
+	return priceText
 }
 
 func main() {
-	reader := bufio.NewReader(os.Stdin)
+
+	data, err := os.ReadFile("config.json")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		log.Fatal(err)
+	}
+
+	if pretty, err := json.MarshalIndent(m, "", "  "); err != nil {
+		fmt.Println("json 格式化失败:", err)
+	} else {
+		fmt.Println(string(pretty))
+	}
+	if wsurl, ok := m["wsurl"].(string); ok {
+		sWsUrl = wsurl
+	}
+	if filepath, ok := m["filepath"].(string); ok {
+		sFilePath = filepath
+	}
+	if maxProductNum, ok := m["maxProductNum"].(float64); ok {
+		sMaxProductNum = int(maxProductNum)
+	}
+	if index, ok := m["index"].(float64); ok {
+		sIndex = int(index)
+	}
 
 	fmt.Println("请选择操作:")
 	fmt.Println(" 1 - 新开浏览器")
 	fmt.Println(" 2 - 连接已有浏览器 (需已开启远程调试端口)")
 	fmt.Print("输入: ")
 
+	reader = bufio.NewReader(os.Stdin)
 	choice, _ := reader.ReadString('\n')
 	choice = strings.TrimSpace(choice)
 
@@ -287,6 +491,9 @@ func main() {
 		fmt.Print("请输入 WebSocket Debugger URL (例如 ws://127.0.0.1:9222/devtools/browser/xxxx): ")
 		wsURL, _ := reader.ReadString('\n')
 		wsURL = strings.TrimSpace(wsURL)
+		if wsURL == "" {
+			wsURL = sWsUrl
+		}
 
 		if !strings.HasPrefix(wsURL, "ws://") {
 			fmt.Println("❌ 无效的 WebSocket URL")
@@ -304,12 +511,20 @@ func main() {
 	commands := map[string]Command{
 		"1": {"获取天津数据", getTianJinData},
 		"2": {"获取SMPAA数据", getSmpaaData},
+		"3": {"报量", reportData},
 	}
+	// sort the commands by key in ascending order
+	var keys []string
+	for k := range commands {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 
 	reader = bufio.NewReader(os.Stdin)
 
-	for name, cmd := range commands {
-		fmt.Printf("  %-2s - %s\n", name, cmd.Desc)
+	for _, k := range keys {
+		cmd := commands[k]
+		fmt.Printf("  %-2s - %s\n", k, cmd.Desc)
 	}
 	fmt.Print("请输入: ")
 	input, _ := reader.ReadString('\n')
