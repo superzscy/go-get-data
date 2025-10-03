@@ -5,11 +5,13 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
-	"sort"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -27,20 +29,24 @@ var sWsUrl string
 var sFilePath string
 var sMaxProductNum int = 0
 var sIndex int = 0
+var sTargetUrl string = ""
+var sMultiThread bool = false
+var sStartIndex int = 0
+var sEndIndex int = 0
 var sSearchResultPath string = `table > tbody > tr[class="ui-widget-content jqgrow ui-row-ltr"]`
 
 type Product struct {
-	index         int     // "序号",
-	code          string  // "药品编码",
-	name          string  // "药品名称",
-	maker         string  // "生产厂家",
-	supplier      string  // "供货商",
-	spec          string  // "规格",
-	num           int     // "数量",
-	unit          string  // "单位",
-	price         float32 // "进价",
-	approval_code string  // "批准文号",
-	platformCode  string  // "平台产品编号",
+	index         int    // "序号",
+	code          string // "药品编码",
+	name          string // "药品名称",
+	maker         string // "生产厂家",
+	supplier      string // "供货商",
+	spec          string // "规格",
+	num           int    // "数量",
+	unit          string // "单位",
+	price         string // "进价",
+	approval_code string // "批准文号",
+	platformCode  string // "平台产品编号",
 }
 
 func newFunction(page *rod.Page, str_rows *[]string) {
@@ -58,8 +64,15 @@ func newFunction(page *rod.Page, str_rows *[]string) {
 			row_str += cells[i].MustText() + ";"
 		}
 		*str_rows = append(*str_rows, row_str)
-		fmt.Println("👉 获取到一行数据:", row_str)
+		log.Println("👉 获取到一行数据:", row_str)
 	}
+}
+
+func trimPriceString(priceText string) string {
+	priceText = strings.TrimPrefix(priceText, "￥")
+	priceText = strings.ReplaceAll(priceText, ",", "")
+	priceText = strings.TrimRight(priceText, "0")
+	return priceText
 }
 
 func isVisible(element *rod.Element) bool {
@@ -86,11 +99,11 @@ func getTianJinData(browser *rod.Browser, skipNav bool) {
 	}
 
 	if page == nil {
-		fmt.Println("创建页面失败:")
+		log.Println("创建页面失败:")
 		return
 	}
 
-	fmt.Println("请在打开的页面中完成登录，然后手动打开你想要的目标页面。完成后按回车继续。")
+	log.Println("请在打开的页面中完成登录，然后手动打开你想要的目标页面。完成后按回车继续。")
 	fmt.Scanln()
 
 	next_selector := "//*[@id=\"app\"]/div[1]/div[2]/section/div/div[2]/div[1]/div[2]/div/button[1]/i"
@@ -99,14 +112,14 @@ func getTianJinData(browser *rod.Browser, skipNav bool) {
 	var str_rows []string
 
 	for i := 1; i <= 68; i++ {
-		fmt.Println("表格数据抓取中, 第", i, "页")
+		log.Println("表格数据抓取中, 第", i, "页")
 		newFunction(page, &str_rows)
 
 		next_button := page.MustElementX(next_selector)
 		next_button.MustClick()
 		// 等待页面加载完成
 		for page.MustHas(loading_selector) {
-			fmt.Println("页面正在加载，请稍等...")
+			log.Println("页面正在加载，请稍等...")
 			time.Sleep(1 * time.Second) // 等待1秒后再次检查
 		}
 	}
@@ -115,7 +128,7 @@ func getTianJinData(browser *rod.Browser, skipNav bool) {
 	file_name := "data.csv"
 	file, err := os.Create(file_name)
 	if err != nil {
-		fmt.Println("创建文件失败:", err)
+		log.Println("创建文件失败:", err)
 		return
 	}
 
@@ -145,7 +158,7 @@ func getSmpaaData(browser *rod.Browser, skipNav bool) {
 		target_url := "https://pub.smpaa.cn/login"
 		page.MustNavigate(target_url).MustWindowMaximize()
 
-		fmt.Println("请在打开的页面中完成登录，然后手动打开你想要的目标页面。完成后按回车继续。")
+		log.Println("请在打开的页面中完成登录，然后手动打开你想要的目标页面。完成后按回车继续。")
 		fmt.Scanln()
 	}
 
@@ -162,11 +175,11 @@ func getSmpaaData(browser *rod.Browser, skipNav bool) {
 		}
 	}
 	if main_table_row_cnt == 0 {
-		fmt.Println("主表没有数据")
+		log.Println("主表没有数据")
 		return
 	}
 
-	fmt.Println("主表行数:", main_table_row_cnt)
+	log.Println("主表行数:", main_table_row_cnt)
 	// var main_table [][]string
 	var sub_table [][]string
 	header_added := false
@@ -175,24 +188,24 @@ func getSmpaaData(browser *rod.Browser, skipNav bool) {
 		// 由于会在主表和附表之间来回跳转, 需要重新获取表数据
 		main_table_element, _ := iframe.ElementX(table_xpath)
 		if main_table_element == nil {
-			fmt.Println("主表元素未找到")
+			log.Println("主表元素未找到")
 			return
 		}
 		main_table_rows, _ := main_table_element.Elements("tr.ui-widget-content.jqgrow.ui-row-ltr")
 		if main_table_rows == nil {
-			fmt.Println("主表元素未找到")
+			log.Println("主表元素未找到")
 			return
 		}
 		main_table_row_cnt = len(main_table_rows)
 		if main_table_row_cnt == 0 {
-			fmt.Println("主表没有数据")
+			log.Println("主表没有数据")
 			return
 		}
 		if index_main >= main_table_row_cnt {
-			fmt.Println("主表行数不足", index_main, main_table_row_cnt)
+			log.Println("主表行数不足", index_main, main_table_row_cnt)
 			return
 		}
-		fmt.Println("获取第", index_main, "行数据")
+		log.Println("获取第", index_main, "行数据")
 
 		row := main_table_rows[index_main]
 		// 找当前行的所有单元格（td 或 th）
@@ -233,7 +246,7 @@ func getSmpaaData(browser *rod.Browser, skipNav bool) {
 						}
 						rowData = append(rowData, text)
 					}
-					// fmt.Println(strings.Join(rowData, ","))
+					// log.Println(strings.Join(rowData, ","))
 					sub_table = append(sub_table, rowData)
 				}
 			}
@@ -241,7 +254,7 @@ func getSmpaaData(browser *rod.Browser, skipNav bool) {
 			table_elem, _ := iframe.Element("table.els-jqGrid.ui-jqgrid-btable")
 			if table_elem != nil {
 				rows_declare := table_elem.MustElements("tr.ui-widget-content.jqgrow.ui-row-ltr")
-				// fmt.Println("获取到的报量行数:", len(rows_declare))
+				// log.Println("获取到的报量行数:", len(rows_declare))
 
 				for _, row := range rows_declare {
 					// 找当前行的所有单元格（td 或 th）
@@ -257,7 +270,7 @@ func getSmpaaData(browser *rod.Browser, skipNav bool) {
 						text := strings.TrimSpace(cell.MustText())
 						rowData = append(rowData, text)
 					}
-					// fmt.Println(strings.Join(rowData, ","))
+					// log.Println(strings.Join(rowData, ","))
 					sub_table = append(sub_table, rowData)
 				}
 			}
@@ -289,22 +302,38 @@ func getSmpaaData(browser *rod.Browser, skipNav bool) {
 }
 
 func reportData(browser *rod.Browser, skipNav bool) {
-
 	var page *rod.Page
 	pages, _ := browser.Pages()
+	var validPages []*rod.Page
 	if len(pages) > 0 {
-		page = pages[0]
-	} else {
-		page = browser.MustPage()
-		fmt.Println("请手动打开你想要的目标页面。完成后按回车继续。")
-		fmt.Scanln()
-	}
-	page.MustWindowMaximize()
-	iframeMain := page.MustElement("iframe#mainframe").MustFrame()
+		for _, p := range pages {
+			if sTargetUrl == p.MustInfo().URL {
+				elem, error := p.Element("iframe#mainframe")
+				if error != nil || elem == nil {
+					continue
+				}
+				iframeMain, error := elem.Frame()
+				if error != nil || iframeMain == nil {
+					continue
+				}
 
+				has, _, _ := iframeMain.Has(`body > div > div > div > a[onclick="searchBy(2);"]`)
+				if has {
+					validPages = append(validPages, p)
+				}
+			}
+		}
+	}
+	var pageCount int = len(validPages)
+	if pageCount == 0 {
+		log.Println("没有可用页面")
+		return
+	}
+
+	log.Printf("正在读取文档%v", sFilePath)
 	f1, err := excelize.OpenFile(sFilePath)
 	if err != nil {
-		log.Fatal("读取 file1 失败")
+		log.Fatal("读取失败")
 		return
 	}
 
@@ -327,10 +356,52 @@ func reportData(browser *rod.Browser, skipNav bool) {
 			if sMaxProductNum > 0 && i > sMaxProductNum {
 				break
 			}
+			if sStartIndex > 0 && i < sStartIndex {
+				continue
+			}
+			if sEndIndex > 0 && i > sEndIndex {
+				break
+			}
 			rowStringArray = append(rowStringArray, row)
 		}
 	}
-	fmt.Println("读取到的行数:", len(rowStringArray))
+	var totalProducts int = len(rowStringArray)
+	if totalProducts == 0 {
+		log.Println("没有数据")
+		return
+	}
+	log.Printf("数据总数: %v", totalProducts)
+
+	var wg sync.WaitGroup
+	if sMultiThread && pageCount > 1 && totalProducts > pageCount {
+		chunkSize := (totalProducts + pageCount - 1) / pageCount // 向上取整
+		log.Printf("将以多线程运行: 线程数:%v, 每个线程处理产品数:%v", pageCount, chunkSize)
+		for i, page := range validPages {
+			start := i * chunkSize
+			end := start + chunkSize
+			if end > totalProducts {
+				end = totalProducts
+			}
+			// 开启一个新的 goroutine 来处理数据块
+			log.Printf("线程 %v 处理第 %v 到 %v 条数据", i+1, start+1, end)
+
+			wg.Add(1)
+			go workFunction(page, rowStringArray[start:end], &wg)
+		}
+	} else {
+		log.Printf("将以单线程运行")
+		page = validPages[0]
+		wg.Add(1)
+		workFunction(page, rowStringArray, &wg)
+	}
+	wg.Wait()
+
+}
+
+func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	iframeMain := page.MustElement("iframe#mainframe").MustFrame()
 	// 需要一个变量来记录平均耗时
 	var totalDuration time.Duration = 0
 
@@ -344,7 +415,7 @@ func reportData(browser *rod.Browser, skipNav bool) {
 				totalDuration += duration
 
 				averageDuration := totalDuration / time.Duration(index+1)
-				fmt.Printf("平均每条耗时: %v, 预计剩余时间: %v\n", averageDuration, averageDuration*time.Duration(len(rowStringArray)))
+				log.Printf("耗时: %v, 平均每条耗时: %v, 预计剩余时间: %v", duration, averageDuration, averageDuration*time.Duration(len(rowStringArray)))
 			}()
 
 			var product Product
@@ -358,11 +429,12 @@ func reportData(browser *rod.Browser, skipNav bool) {
 			// convert string to int
 			fmt.Sscanf(row[6], "%d", &product.num)
 			product.unit = row[7]
-			fmt.Sscanf(row[8], "%f", &product.price)
+			product.price = trimPriceString(row[8])
 			product.approval_code = row[9]
 			product.platformCode = row[10]
 
-			fmt.Printf("开始添加商品, 序号: %d, 药品名称: %s, 产品编号: %s, 采购数量: %d, 采购价格: %f. 供应商: %s\n", product.index, product.name, product.code, product.num, product.price, product.supplier)
+			log.Printf("开始添加商品, 序号: %d, 药品名称: %s, 产品编号: %s, 采购数量: %d, 采购价格: %s. 供应商: %s",
+				product.index, product.name, product.platformCode, product.num, product.price, product.supplier)
 
 			// 带量采购
 			iframeMain.MustElementR("a", "带量采购").MustClick()
@@ -371,26 +443,28 @@ func reportData(browser *rod.Browser, skipNav bool) {
 			iframeMain.MustElementR("button", "清空").MustClick()
 
 			// 更多
-			has, elem, err := iframeMain.Has("#searchForm > div:nth-child(4) > div.moreButton")
-			if err == nil && has && elem.MustText() == "更多" {
+			has, elem, err := iframeMain.Has(`div[class="moreButton"]`)
+			if err == nil && has {
 				elem.MustClick()
 			}
 
-			iframeMain.MustElementX("//*[@id=\"goodsId\"]").MustInput(product.platformCode)
+			iframeMain.MustElement(`input[id="goodsId"][name="goodsId"]`).MustInput(product.platformCode)
+			iframeMain.MustElement(`input[id="companyNamePs"][name="companyNamePs"]`).MustInput(product.supplier)
+
 			iframeMain.MustElementX("//*[@id=\"search1\"]").MustClick()
 			iframeMain.MustWaitStable()
 
 			has, elem, err = iframeMain.Has(sSearchResultPath)
 			if err != nil {
-				fmt.Println("[带量采购] 搜索错误:", err)
+				log.Println("[带量采购] 搜索错误:", err)
 				return
 			}
 
 			if has {
-				fmt.Println("[带量采购] 搜索到结果")
+				log.Println("[带量采购] 搜索到结果")
 				elem.MustElement(`td > input[name="buyNum"]`).MustInput(strconv.Itoa(product.num))
 				priceText := trimPriceString(elem.MustElement(`td[aria-describedby="gridlist_contractPriceInfo"]`).MustText())
-				fmt.Println("价格:", priceText)
+				log.Println("价格:", priceText)
 
 				// elem.MustElement(`td > input[name="buyNum"]`).MustInput("100")
 				// elem.MustElement(`td > input[name="buyNum"]`).MustInput("100")
@@ -401,46 +475,45 @@ func reportData(browser *rod.Browser, skipNav bool) {
 				return
 
 			} else {
-				fmt.Println("[带量采购] 未搜索到结果")
+				log.Println("[带量采购] 未搜索到结果")
 			}
 
 			// 普通采购
 			iframeMain.MustElementR("a", "普通采购").MustClick()
 			iframeMain.MustWaitStable()
 
-			iframeMain.MustElementX("//*[@id=\"clear\"]").MustClick()
-			iframeMain.MustElementX("//*[@id=\"procurecatalogId\"]").MustInput(product.platformCode)
+			iframeMain.MustElementR("button", "清空").MustClick()
+			iframeMain.MustElement(`input[id="procurecatalogId"][name="procurecatalogId"]`).MustInput(product.platformCode)
+			iframeMain.MustElement(`input[id="companyNamePs"][name="companyNamePs"]`).MustInput(product.supplier)
+
 			iframeMain.MustElementX("//*[@id=\"search1\"]").MustClick()
 			iframeMain.MustWaitStable()
 
 			has, elem, err = iframeMain.Has(sSearchResultPath)
 			if err != nil {
-				fmt.Println("[普通采购] 搜索错误:", err)
+				log.Println("[普通采购] 搜索错误:", err)
 				return
 			}
 			if has {
-				fmt.Println("[普通采购] 搜索到结果")
-				elem.MustElement(`td > input[name="buyNum"]`).MustInput(strconv.Itoa(product.num))
+				log.Println("[普通采购] 搜索到结果")
 				priceText := trimPriceString(elem.MustElement(`td[aria-describedby="gridlist_contractPriceInfo"]`).MustText())
-				fmt.Println("价格:", priceText)
-				elem.MustElement(`td[aria-describedby="gridlist_cb"] > input[class="cbox"]`).MustClick()
-				iframeMain.MustElementR("button", "加入订单").MustClick()
+				if priceText == product.price {
+					log.Printf("加入订单, 数量: %d", product.num)
+					elem.MustElement(`td > input[name="buyNum"]`).MustInput(strconv.Itoa(product.num))
+					elem.MustElement(`td[aria-describedby="gridlist_cb"] > input[class="cbox"]`).MustClick()
+					iframeMain.MustElementR("button", "加入订单").MustClick()
+				} else {
+					log.Printf("价格不匹配, 预期: %s, 实际: %s", product.price, priceText)
+				}
+
 			} else {
-				fmt.Println("[普通采购] 未搜索到结果")
+				log.Println("[普通采购] 未搜索到结果")
 			}
 		}(index, row)
 	}
 }
 
-func trimPriceString(priceText string) string {
-	priceText = strings.TrimPrefix(priceText, "￥")
-	priceText = strings.ReplaceAll(priceText, ",", "")
-	priceText = strings.TrimRight(priceText, "0")
-	return priceText
-}
-
 func main() {
-
 	data, err := os.ReadFile("config.json")
 	if err != nil {
 		log.Fatal(err)
@@ -452,9 +525,9 @@ func main() {
 	}
 
 	if pretty, err := json.MarshalIndent(m, "", "  "); err != nil {
-		fmt.Println("json 格式化失败:", err)
+		log.Println("json 格式化失败:", err)
 	} else {
-		fmt.Println(string(pretty))
+		log.Println(string(pretty))
 	}
 	if wsurl, ok := m["wsurl"].(string); ok {
 		sWsUrl = wsurl
@@ -468,11 +541,89 @@ func main() {
 	if index, ok := m["index"].(float64); ok {
 		sIndex = int(index)
 	}
+	if targetUrl, ok := m["targetUrl"].(string); ok {
+		sTargetUrl = targetUrl
+	}
+	if multiThread, ok := m["multiThread"].(bool); ok {
+		sMultiThread = multiThread
+	}
+	if startIndex, ok := m["startIndex"].(float64); ok {
+		sStartIndex = int(startIndex)
+	}
+	if endIndex, ok := m["endIndex"].(float64); ok {
+		sEndIndex = int(endIndex)
+	}
 
-	fmt.Println("请选择操作:")
-	fmt.Println(" 1 - 新开浏览器")
-	fmt.Println(" 2 - 连接已有浏览器 (需已开启远程调试端口)")
-	fmt.Print("输入: ")
+	logFilePath := "./logs/app.log"
+
+	// 确保日志目录存在
+	dir := filepath.Dir(logFilePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fmt.Println("无法创建日志目录:", err)
+	}
+
+	base := filepath.Base(logFilePath)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+
+	var finalLogPath string
+	index := 0
+	for {
+		var candidate string
+		if index == 0 {
+			candidate = filepath.Join(dir, fmt.Sprintf("%s%s", name, ext)) // app.log
+		} else {
+			candidate = filepath.Join(dir, fmt.Sprintf("%s%d%s", name, index, ext)) // app1.log, app2.log...
+		}
+
+		// 如果候选文件不存在，直接使用它
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			finalLogPath = candidate
+			break
+		}
+
+		// 候选存在先尝试把原始文件重命名为带时间戳的名字
+		var tsName string
+		if index == 0 {
+			tsName = fmt.Sprintf("%s_%s%s", name, time.Now().Format("2006-01-02_15-04-05"), ext)
+		} else {
+			tsName = fmt.Sprintf("%s%d_%s%s", name, index, time.Now().Format("2006-01-02_15-04-05"), ext)
+		}
+		tsPath := filepath.Join(dir, tsName)
+
+		if err := os.Rename(candidate, tsPath); err == nil {
+			// 重命名成功，原名现在可用
+			finalLogPath = candidate
+			fmt.Println("已重命名旧日志文件为:", tsPath)
+			break
+		}
+		// 重命名失败（通常是文件被占用），改用 app1.log 开始尝试
+		// index > 0，说明 candidate（如 app1.log）也存在，尝试下一个编号
+		index++
+		// 保险退出，以免无限循环
+		if index > 1000 {
+			fmt.Println("无法找到可用的日志文件名，使用默认:", logFilePath)
+			break
+		}
+	}
+
+	logFilePath = finalLogPath
+	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Println("无法创建日志文件，继续使用 stdout:", err)
+	} else {
+		mw := io.MultiWriter(os.Stdout, logFile)
+		log.SetOutput(mw)
+		// 可根据需要设置 log flags
+		log.SetFlags(log.LstdFlags | log.Lshortfile)
+		// 在 main 函数退出时关闭文件
+		defer logFile.Close()
+	}
+
+	log.Println("请选择操作:")
+	log.Println(" 1 - 新开浏览器")
+	log.Println(" 2 - 连接已有浏览器 (需已开启远程调试端口)")
+	log.Print("输入: ")
 
 	reader = bufio.NewReader(os.Stdin)
 	choice, _ := reader.ReadString('\n')
@@ -483,12 +634,20 @@ func main() {
 	switch choice {
 	case "1":
 		// 新开一个 Chrome
-		wsURL := launcher.NewUserMode().Set("user-data-dir", "D:\\chrome_rod_usr_data").Leakless(false).MustLaunch()
-		fmt.Println("wsURL:", wsURL)
+		wsURL := launcher.New().
+			Headless(false).
+			Leakless(false).
+			MustLaunch()
+		log.Println("wsURL:", wsURL)
 		browser = rod.New().ControlURL(wsURL).MustConnect().NoDefaultDevice()
+		defer browser.MustClose()
+		page := browser.MustPage()
+		_ = page
+		log.Println("请手动打开你想要的目标页面。完成后按回车继续。")
+		fmt.Scanln()
 
 	case "2":
-		fmt.Print("请输入 WebSocket Debugger URL (例如 ws://127.0.0.1:9222/devtools/browser/xxxx): ")
+		log.Print("请输入 WebSocket Debugger URL (例如 ws://127.0.0.1:9222/devtools/browser/xxxx): ")
 		wsURL, _ := reader.ReadString('\n')
 		wsURL = strings.TrimSpace(wsURL)
 		if wsURL == "" {
@@ -496,43 +655,46 @@ func main() {
 		}
 
 		if !strings.HasPrefix(wsURL, "ws://") {
-			fmt.Println("❌ 无效的 WebSocket URL")
+			log.Println("❌ 无效的 WebSocket URL")
 			return
 		}
 
 		browser = rod.New().ControlURL(wsURL).MustConnect()
-		fmt.Println("✅ 已连接到已有浏览器")
+		defer browser.MustClose()
+		log.Println("✅ 已连接到已有浏览器")
 	default:
-		fmt.Println("❌ 无效选择")
+		log.Println("❌ 无效选择")
 		return
 	}
 
+	reportData(browser, false)
+
 	// 命令映射
-	commands := map[string]Command{
-		"1": {"获取天津数据", getTianJinData},
-		"2": {"获取SMPAA数据", getSmpaaData},
-		"3": {"报量", reportData},
-	}
-	// sort the commands by key in ascending order
-	var keys []string
-	for k := range commands {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	// commands := map[string]Command{
+	// 	"1": {"获取天津数据", getTianJinData},
+	// 	"2": {"获取SMPAA数据", getSmpaaData},
+	// 	"3": {"报量", reportData},
+	// }
+	// // sort the commands by key in ascending order
+	// var keys []string
+	// for k := range commands {
+	// 	keys = append(keys, k)
+	// }
+	// sort.Strings(keys)
 
-	reader = bufio.NewReader(os.Stdin)
+	// reader = bufio.NewReader(os.Stdin)
 
-	for _, k := range keys {
-		cmd := commands[k]
-		fmt.Printf("  %-2s - %s\n", k, cmd.Desc)
-	}
-	fmt.Print("请输入: ")
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
+	// for _, k := range keys {
+	// 	cmd := commands[k]
+	// 	log.Printf("  %-2s - %s\n", k, cmd.Desc)
+	// }
+	// log.Print("请输入: ")
+	// input, _ := reader.ReadString('\n')
+	// input = strings.TrimSpace(input)
 
-	if cmd, ok := commands[input]; ok {
-		skipNav := choice == "2"
+	// if cmd, ok := commands[input]; ok {
+	// 	skipNav := choice == "2"
 
-		cmd.Run(browser, skipNav)
-	}
+	// 	cmd.Run(browser, skipNav)
+	// }
 }
