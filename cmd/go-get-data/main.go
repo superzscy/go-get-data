@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/csv"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,9 @@ import (
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/xuri/excelize/v2"
 )
+
+var StartIndex = flag.Int("StartIndex", 0, "Start index for reporting")
+var EndIndex = flag.Int("EndIndex", 0, "End index for reporting")
 
 type Command struct {
 	Desc string
@@ -47,6 +51,13 @@ type Product struct {
 	price         string // "进价",
 	approval_code string // "批准文号",
 	platformCode  string // "平台产品编号",
+
+	added                      bool   // 是否已添加到订单
+	success_details            string // 添加成功的明细
+	failure_details            string // 添加失败的明细
+	normal_purchase_quantity   int    // 普通采购量已加入数量
+	contract_purchase_quantity int    // 带量采购量已加入数量
+	rest_quantity              int    // 剩余数量
 }
 
 func newFunction(page *rod.Page, str_rows *[]string) {
@@ -301,26 +312,35 @@ func getSmpaaData(browser *rod.Browser, skipNav bool) {
 	}
 }
 
+func EnsureLen(slice []string, n int) []string {
+	if len(slice) < n {
+		// 需要补多少个
+		diff := n - len(slice)
+		// 生成 diff 个默认值（这里是 ""）
+		extra := make([]string, diff)
+		slice = append(slice, extra...)
+	}
+	return slice
+}
+
 func reportData(browser *rod.Browser, skipNav bool) {
 	var page *rod.Page
 	pages, _ := browser.Pages()
 	var validPages []*rod.Page
 	if len(pages) > 0 {
 		for _, p := range pages {
-			if sTargetUrl == p.MustInfo().URL {
-				elem, error := p.Element("iframe#mainframe")
-				if error != nil || elem == nil {
-					continue
-				}
-				iframeMain, error := elem.Frame()
-				if error != nil || iframeMain == nil {
-					continue
-				}
+			elem, error := p.Element("iframe#mainframe")
+			if error != nil || elem == nil {
+				continue
+			}
+			iframeMain, error := elem.Frame()
+			if error != nil || iframeMain == nil {
+				continue
+			}
 
-				has, _, _ := iframeMain.Has(`body > div > div > div > a[onclick="searchBy(2);"]`)
-				if has {
-					validPages = append(validPages, p)
-				}
+			has, _, _ := iframeMain.Has(`body > div > div > div > a[onclick="searchBy(2);"]`)
+			if has {
+				validPages = append(validPages, p)
 			}
 		}
 	}
@@ -346,6 +366,8 @@ func reportData(browser *rod.Browser, skipNav bool) {
 		if i == 0 {
 			continue
 		}
+
+		row = EnsureLen(row, 10)
 
 		if sIndex > 0 {
 			if i == sIndex {
@@ -405,6 +427,8 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 	// 需要一个变量来记录平均耗时
 	var totalDuration time.Duration = 0
 
+	var products []Product = make([]Product, len(rowStringArray))
+
 	for index, row := range rowStringArray {
 		func(index int, row []string) {
 			beginTime := time.Now()
@@ -415,10 +439,10 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 				totalDuration += duration
 
 				averageDuration := totalDuration / time.Duration(index+1)
-				log.Printf("耗时: %v, 平均每条耗时: %v, 预计剩余时间: %v", duration, averageDuration, averageDuration*time.Duration(len(rowStringArray)))
+				log.Printf("耗时: %v, 平均每条耗时: %v, 预计剩余时间: %v", duration, averageDuration, averageDuration*time.Duration(len(rowStringArray)-index-1))
 			}()
 
-			var product Product
+			product := &products[index]
 			// assign values to product fields
 			fmt.Sscanf(row[0], "%d", &product.index)
 			product.code = row[1]
@@ -431,7 +455,43 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 			product.unit = row[7]
 			product.price = trimPriceString(row[8])
 			product.approval_code = row[9]
-			product.platformCode = row[10]
+			if len(row) > 10 {
+				product.platformCode = row[10]
+			}
+
+			if len(row) > 11 {
+				product.added = row[11] == "是"
+			}
+			if len(row) > 12 {
+				product.success_details = row[12]
+			}
+			if len(row) > 13 {
+				product.failure_details = row[13]
+			}
+			if len(row) > 14 {
+				fmt.Sscanf(row[14], "%d", &product.normal_purchase_quantity)
+			}
+			if len(row) > 15 {
+				fmt.Sscanf(row[15], "%d", &product.contract_purchase_quantity)
+			}
+			if len(row) > 16 {
+				fmt.Sscanf(row[16], "%d", &product.rest_quantity)
+			}
+
+			if product.platformCode == "" {
+				log.Printf("跳过平台产品编号为空的商品, 序号: %d, 药品名称: %s", product.index, product.name)
+				return
+			}
+
+			if product.added {
+				log.Printf("跳过已添加商品, 序号: %d, 药品名称: %s, 产品编号: %s", product.index, product.name, product.platformCode)
+				return
+			}
+
+			if product.num <= 0 {
+				log.Printf("跳过采购数量小于等于0的商品, 序号: %d, 药品名称: %s, 产品编号: %s", product.index, product.name, product.platformCode)
+				return
+			}
 
 			log.Printf("开始添加商品, 序号: %d, 药品名称: %s, 产品编号: %s, 采购数量: %d, 采购价格: %s. 供应商: %s",
 				product.index, product.name, product.platformCode, product.num, product.price, product.supplier)
@@ -448,6 +508,7 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 				elem.MustClick()
 			}
 
+			// 匹配平台产品编号 + 供货商
 			iframeMain.MustElement(`input[id="goodsId"][name="goodsId"]`).MustInput(product.platformCode)
 			iframeMain.MustElement(`input[id="companyNamePs"][name="companyNamePs"]`).MustInput(product.supplier)
 
@@ -456,33 +517,61 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 
 			has, elem, err = iframeMain.Has(sSearchResultPath)
 			if err != nil {
-				log.Println("[带量采购] 搜索错误:", err)
+				product.failure_details = "搜索时发生错误"
+				log.Printf("[带量采购] %s: %v", product.failure_details, err)
 				return
 			}
 
 			if has {
 				log.Println("[带量采购] 搜索到结果")
-				elem.MustElement(`td > input[name="buyNum"]`).MustInput(strconv.Itoa(product.num))
+
+				// 匹配价格
 				priceText := trimPriceString(elem.MustElement(`td[aria-describedby="gridlist_contractPriceInfo"]`).MustText())
-				log.Println("价格:", priceText)
+				// 去掉末尾的小数点
+				priceText = strings.TrimSuffix(priceText, ".")
+				if priceText != product.price {
+					product.failure_details = fmt.Sprintf("价格不匹配, excel价格: %s, 系统价格: %s", product.price, priceText)
+					log.Printf("[带量采购] %s", product.failure_details)
+					return
+				}
 
-				// elem.MustElement(`td > input[name="buyNum"]`).MustInput("100")
-				// elem.MustElement(`td > input[name="buyNum"]`).MustInput("100")
+				// 查询剩余合同数量
+				ctrl_contract_num_, _ := strconv.Atoi(iframeMain.MustElement(`td[aria-describedby="gridlist_contractNumber"]`).MustText())
 
+				ctrl_contract_complete_num, _ := strconv.Atoi(iframeMain.MustElement(`td[aria-describedby="gridlist_currentContractExecuteNumber"] > a`).MustText())
+				rest_contract_num := ctrl_contract_num_ - ctrl_contract_complete_num
+				buy_num := product.num
+
+				if buy_num > rest_contract_num {
+					log.Printf("[带量采购] 采购数量超过剩余合同数量, 序号: %d, 药品名称: %s, 产品编号: %s, 采购数量: %d, 剩余合同数量: %d",
+						product.index, product.name, product.platformCode, product.num, rest_contract_num)
+
+					product.rest_quantity = buy_num - rest_contract_num
+					buy_num = rest_contract_num
+				} else {
+					product.rest_quantity = 0
+				}
+
+				elem.MustElement(`td > input[name="buyNum"]`).MustInput(strconv.Itoa(buy_num))
 				elem.MustElement(`td[aria-describedby="gridlist_cb"] > input[class="cbox"]`).MustClick()
 				iframeMain.MustElementR("button", "加入订单").MustClick()
 
-				return
+				product.added = true
+				product.success_details = "采购类型: \"带量\""
+				product.contract_purchase_quantity = buy_num
+				log.Printf("[带量采购] 加入订单, %d %s 数量: %d", product.index, product.name, buy_num)
 
+				return
 			} else {
-				log.Println("[带量采购] 未搜索到结果")
+				log.Printf("%s", "[带量采购] 未搜索到结果")
 			}
 
 			// 普通采购
 			iframeMain.MustElementR("a", "普通采购").MustClick()
 			iframeMain.MustWaitStable()
-
 			iframeMain.MustElementR("button", "清空").MustClick()
+
+			// 匹配平台产品编号 + 供货商
 			iframeMain.MustElement(`input[id="procurecatalogId"][name="procurecatalogId"]`).MustInput(product.platformCode)
 			iframeMain.MustElement(`input[id="companyNamePs"][name="companyNamePs"]`).MustInput(product.supplier)
 
@@ -491,29 +580,123 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 
 			has, elem, err = iframeMain.Has(sSearchResultPath)
 			if err != nil {
-				log.Println("[普通采购] 搜索错误:", err)
+				product.failure_details = "搜索时发生错误"
+				log.Printf("[普通采购] %s: %v", product.failure_details, err)
 				return
 			}
-			if has {
-				log.Println("[普通采购] 搜索到结果")
-				priceText := trimPriceString(elem.MustElement(`td[aria-describedby="gridlist_contractPriceInfo"]`).MustText())
-				if priceText == product.price {
-					log.Printf("加入订单, 数量: %d", product.num)
-					elem.MustElement(`td > input[name="buyNum"]`).MustInput(strconv.Itoa(product.num))
-					elem.MustElement(`td[aria-describedby="gridlist_cb"] > input[class="cbox"]`).MustClick()
-					iframeMain.MustElementR("button", "加入订单").MustClick()
-				} else {
-					log.Printf("价格不匹配, 预期: %s, 实际: %s", product.price, priceText)
-				}
-
-			} else {
-				log.Println("[普通采购] 未搜索到结果")
+			if !has {
+				product.failure_details = "未搜索到结果"
+				log.Printf("[普通采购] %s", product.failure_details)
+				return
 			}
+
+			// 匹配价格
+			priceText := trimPriceString(elem.MustElement(`td[aria-describedby="gridlist_contractPriceInfo"]`).MustText())
+			// 去掉末尾的小数点
+			priceText = strings.TrimSuffix(priceText, ".")
+			if priceText != product.price {
+				product.failure_details = fmt.Sprintf("价格不匹配, excel价格: %s, 系统价格: %s", product.price, priceText)
+				log.Printf("[普通采购] %s", product.failure_details)
+				return
+			}
+
+			elem.MustElement(`td > input[name="buyNum"]`).MustInput(strconv.Itoa(product.num))
+			elem.MustElement(`td[aria-describedby="gridlist_cb"] > input[class="cbox"]`).MustClick()
+			iframeMain.MustElementR("button", "加入订单").MustClick()
+
+			product.added = true
+			product.success_details = "采购类型: \"普通\""
+			product.contract_purchase_quantity = product.num
+			log.Printf("[普通采购] 加入订单, %d %s 数量: %d", product.index, product.name, product.num)
 		}(index, row)
+	}
+
+	log.Printf("添加完毕, 总耗时: %v", totalDuration)
+	for _, row_data := range products {
+		var strAdded string = "否"
+		if row_data.added {
+			strAdded = "是"
+		}
+		log.Printf("%d;%s;%s;%s;%d;%d;%d",
+			row_data.index,
+			strAdded,
+			row_data.success_details,
+			row_data.failure_details,
+			row_data.normal_purchase_quantity,
+			row_data.contract_purchase_quantity,
+			row_data.rest_quantity,
+		)
 	}
 }
 
+func convertJsonToXlsx() {
+	var str_rows []string
+	for i := 1; i <= 4; i++ {
+		data, err := os.ReadFile(fmt.Sprintf("data%d.json", i))
+		if err != nil {
+			log.Println("读取文件失败:", err)
+			continue
+		}
+		var jsonData map[string]interface{}
+		if err := json.Unmarshal(data, &jsonData); err != nil {
+			log.Println("解析 JSON 失败:", err)
+			continue
+		}
+		// 读取jsonData中"data"."list"数组
+
+		var list = jsonData["data"].(map[string]interface{})["list"].([]interface{})
+		for _, item := range list {
+			m := item.(map[string]interface{})
+			str := fmt.Sprintf("%s;%s;%s;%s;%s;%s;%f;%s;%s;%f",
+				m["ybbm"].(string),
+				m["genname"].(string),
+				m["dosform"].(string),
+				m["spec"].(string),
+				m["pac"].(string),
+				m["aprvno"].(string),
+				m["convrat"].(float64),
+				m["min_salunt"].(string),
+				m["enterprise_name"].(string),
+				m["min_pric"].(float64),
+			)
+			str_rows = append(str_rows, str)
+		}
+	}
+
+	// write to file csv
+	file_name := "data.csv"
+	file, err := os.Create(file_name)
+	if err != nil {
+		log.Println("创建文件失败:", err)
+		return
+	}
+
+	writer := csv.NewWriter(file)
+
+	// 写入表头
+	writer.Write([]string{"医保编码;产品名称;剂型;制剂规格;包装规格;批准文号;转换比;单位;药品企业;中选价格"})
+
+	// 写入数据
+	for _, row := range str_rows {
+		writer.Write([]string{row})
+	}
+	writer.Flush()
+	file.Close()
+
+}
+
 func main() {
+	flag.Parse()
+
+	if *StartIndex > 0 {
+		sStartIndex = *StartIndex
+		fmt.Println("StartIndex:", *StartIndex)
+	}
+	if *EndIndex > 0 {
+		sEndIndex = *EndIndex
+		fmt.Println("EndIndex:", *EndIndex)
+	}
+
 	data, err := os.ReadFile("config.json")
 	if err != nil {
 		log.Fatal(err)
@@ -546,12 +729,6 @@ func main() {
 	}
 	if multiThread, ok := m["multiThread"].(bool); ok {
 		sMultiThread = multiThread
-	}
-	if startIndex, ok := m["startIndex"].(float64); ok {
-		sStartIndex = int(startIndex)
-	}
-	if endIndex, ok := m["endIndex"].(float64); ok {
-		sEndIndex = int(endIndex)
 	}
 
 	logFilePath := "./logs/app.log"
@@ -640,8 +817,12 @@ func main() {
 			MustLaunch()
 		log.Println("wsURL:", wsURL)
 		browser = rod.New().ControlURL(wsURL).MustConnect().NoDefaultDevice()
-		defer browser.MustClose()
+		// defer browser.MustClose()
 		page := browser.MustPage()
+		// open target url
+		if sTargetUrl != "" {
+			page.MustNavigate(sTargetUrl).MustWindowMaximize()
+		}
 		_ = page
 		log.Println("请手动打开你想要的目标页面。完成后按回车继续。")
 		fmt.Scanln()
@@ -660,14 +841,17 @@ func main() {
 		}
 
 		browser = rod.New().ControlURL(wsURL).MustConnect()
-		defer browser.MustClose()
+		// defer browser.MustClose()
 		log.Println("✅ 已连接到已有浏览器")
+	case "3":
+		convertJsonToXlsx()
 	default:
 		log.Println("❌ 无效选择")
 		return
 	}
 
 	reportData(browser, false)
+	//getTianJinData(browser, false)
 
 	// 命令映射
 	// commands := map[string]Command{
