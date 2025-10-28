@@ -82,7 +82,24 @@ func newFunction(page *rod.Page, str_rows *[]string) {
 func trimPriceString(priceText string) string {
 	priceText = strings.TrimPrefix(priceText, "￥")
 	priceText = strings.ReplaceAll(priceText, ",", "")
-	priceText = strings.TrimRight(priceText, "0")
+
+	// if the text looks like "123.000", the decimal part are all zero, remove the trailing zeros and the dot
+	if strings.Contains(priceText, ".") {
+		parts := strings.SplitN(priceText, ".", 2)
+		intPart := parts[0]
+		decPart := parts[1]
+
+		// 去掉小数部分末尾的所有 0
+		decPart = strings.TrimRight(decPart, "0")
+
+		// 如果小数部分清空了，去掉小数点
+		if decPart == "" {
+			return intPart
+		}
+
+		return intPart + "." + decPart
+	}
+
 	return priceText
 }
 
@@ -506,6 +523,14 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 			has, elem, err := iframeMain.Has(`div[class="moreButton"]`)
 			if err == nil && has {
 				elem.MustClick()
+			} else {
+				log.Printf("未找到更多按钮")
+				has, _, _ = iframeMain.Has(`input[id="goodsId"][name="goodsId"]`)
+				if !has {
+					product.failure_details = "未找到产品ID输入框"
+					log.Printf("[带量采购] %s", product.failure_details)
+					return
+				}
 			}
 
 			// 匹配平台产品编号 + 供货商
@@ -527,8 +552,7 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 
 				// 匹配价格
 				priceText := trimPriceString(elem.MustElement(`td[aria-describedby="gridlist_contractPriceInfo"]`).MustText())
-				// 去掉末尾的小数点
-				priceText = strings.TrimSuffix(priceText, ".")
+
 				if priceText != product.price {
 					product.failure_details = fmt.Sprintf("价格不匹配, excel价格: %s, 系统价格: %s", product.price, priceText)
 					log.Printf("[带量采购] %s", product.failure_details)
@@ -558,6 +582,7 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 
 				product.added = true
 				product.success_details = "采购类型: \"带量\""
+				product.failure_details = ""
 				product.contract_purchase_quantity = buy_num
 				log.Printf("[带量采购] 加入订单, %d %s 数量: %d", product.index, product.name, buy_num)
 
@@ -592,8 +617,7 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 
 			// 匹配价格
 			priceText := trimPriceString(elem.MustElement(`td[aria-describedby="gridlist_contractPriceInfo"]`).MustText())
-			// 去掉末尾的小数点
-			priceText = strings.TrimSuffix(priceText, ".")
+
 			if priceText != product.price {
 				product.failure_details = fmt.Sprintf("价格不匹配, excel价格: %s, 系统价格: %s", product.price, priceText)
 				log.Printf("[普通采购] %s", product.failure_details)
@@ -606,7 +630,8 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 
 			product.added = true
 			product.success_details = "采购类型: \"普通\""
-			product.contract_purchase_quantity = product.num
+			product.failure_details = ""
+			product.normal_purchase_quantity = product.num
 			log.Printf("[普通采购] 加入订单, %d %s 数量: %d", product.index, product.name, product.num)
 		}(index, row)
 	}
