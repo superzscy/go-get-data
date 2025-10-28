@@ -450,15 +450,6 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 		func(index int, row []string) {
 			beginTime := time.Now()
 
-			// 计算耗时
-			defer func() {
-				duration := time.Since(beginTime)
-				totalDuration += duration
-
-				averageDuration := totalDuration / time.Duration(index+1)
-				log.Printf("耗时: %v, 平均每条耗时: %v, 预计剩余时间: %v", duration, averageDuration, averageDuration*time.Duration(len(rowStringArray)-index-1))
-			}()
-
 			product := &products[index]
 			// assign values to product fields
 			fmt.Sscanf(row[0], "%d", &product.index)
@@ -495,26 +486,39 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 				fmt.Sscanf(row[16], "%d", &product.rest_quantity)
 			}
 
-			if product.platformCode == "" {
-				log.Printf("跳过平台产品编号为空的商品, 序号: %d, 药品名称: %s", product.index, product.name)
+			if product.added {
+				log.Printf("跳过 序号: %d, 药品名称: %s, 产品编号: %s, 原因:已添加商品", product.index, product.name, product.platformCode)
 				return
 			}
 
-			if product.added {
-				log.Printf("跳过已添加商品, 序号: %d, 药品名称: %s, 产品编号: %s", product.index, product.name, product.platformCode)
+			if product.platformCode == "" {
+				product.failure_details = "平台产品编号为空"
+				log.Printf("跳过 序号: %d, 药品名称: %s, 原因: %s", product.index, product.name, product.failure_details)
 				return
 			}
 
 			if product.num <= 0 {
-				log.Printf("跳过采购数量小于等于0的商品, 序号: %d, 药品名称: %s, 产品编号: %s", product.index, product.name, product.platformCode)
+				product.failure_details = "采购数量小于等于0"
+				log.Printf("跳过 序号: %d, 药品名称: %s, 产品编号: %s, 原因: %s", product.index, product.name, product.platformCode, product.failure_details)
 				return
 			}
+
+			// 计算耗时
+			defer func() {
+				duration := time.Since(beginTime)
+				totalDuration += duration
+
+				averageDuration := totalDuration / time.Duration(index+1)
+				log.Printf("耗时: %d, 平均每条耗时: %.2f, 预计剩余时间: %v", duration, averageDuration.Seconds(), averageDuration*time.Duration(len(rowStringArray)-index-1))
+			}()
 
 			log.Printf("开始添加商品, 序号: %d, 药品名称: %s, 产品编号: %s, 采购数量: %d, 采购价格: %s. 供应商: %s",
 				product.index, product.name, product.platformCode, product.num, product.price, product.supplier)
 
 			// 带量采购
 			iframeMain.MustElementR("a", "带量采购").MustClick()
+
+			iframeMain = page.MustElement("iframe#mainframe").MustFrame()
 			iframeMain.MustWaitStable()
 
 			iframeMain.MustElementR("button", "清空").MustClick()
@@ -593,7 +597,10 @@ func workFunction(page *rod.Page, rowStringArray [][]string, wg *sync.WaitGroup)
 
 			// 普通采购
 			iframeMain.MustElementR("a", "普通采购").MustClick()
+
+			iframeMain = page.MustElement("iframe#mainframe").MustFrame()
 			iframeMain.MustWaitStable()
+
 			iframeMain.MustElementR("button", "清空").MustClick()
 
 			// 匹配平台产品编号 + 供货商
