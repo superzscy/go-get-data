@@ -112,65 +112,142 @@ func isVisible(element *rod.Element) bool {
 }
 
 func getTianJinData(browser *rod.Browser, skipNav bool) {
-	var page *rod.Page
+	pages, _ := browser.Pages()
+	page := pages[0]
+	page.MustWindowMaximize()
 
-	if skipNav {
-		pages, _ := browser.Pages()
-		if len(pages) > 0 {
-			page = pages[0]
-			page.MustWindowMaximize()
+	iframe := page.MustElement("iframe").MustFrame()
+
+	type MainData struct {
+		GroupId string
+		Name    string
+	}
+
+	scrapMainData := true
+	var mainDatas []MainData
+	if scrapMainData {
+		headerRows := iframe.MustElements("div.el-table__fixed div.el-table__fixed-header-wrapper thead.has-gutter th div.cell")
+		for i, row := range headerRows {
+			fmt.Printf("第 %d 行: %v\n", i+1, row.MustText())
 		}
-	} else {
-		target_url := "https://tps.ylbz.tj.gov.cn/jc/tps-local/b/#/addRequireSndl3Jx"
-		page = browser.MustPage()
-		page.MustNavigate(target_url).MustWindowMaximize()
-	}
 
-	if page == nil {
-		log.Println("创建页面失败:")
-		return
-	}
+		data_table := iframe.MustElement(".el-table")
+		rows := data_table.MustElements("div.el-table__body-wrapper tr.el-table__row")
 
-	log.Println("请在打开的页面中完成登录，然后手动打开你想要的目标页面。完成后按回车继续。")
-	fmt.Scanln()
+		for _, row := range rows {
+			cells := row.MustElements("td")
+			values := []string{}
+			for _, cell := range cells {
+				text := cell.MustText()
+				values = append(values, text)
+			}
+			// fmt.Printf("%d 行数据 %v\n", i+1, values)
 
-	next_selector := "//*[@id=\"app\"]/div[1]/div[2]/section/div/div[2]/div[1]/div[2]/div/button[1]/i"
-
-	loading_selector := "body > div.el-loading-mask.is-fullscreen.el-loading-fade-leave-active.el-loading-fade-leave-to"
-	var str_rows []string
-
-	for i := 1; i <= 68; i++ {
-		log.Println("表格数据抓取中, 第", i, "页")
-		newFunction(page, &str_rows)
-
-		next_button := page.MustElementX(next_selector)
-		next_button.MustClick()
-		// 等待页面加载完成
-		for page.MustHas(loading_selector) {
-			log.Println("页面正在加载，请稍等...")
-			time.Sleep(1 * time.Second) // 等待1秒后再次检查
+			mainDatas = append(mainDatas, MainData{
+				GroupId: values[1],
+				Name:    values[4],
+			})
+			// fmt.Printf("第 %d 行: %v %v\n", i+1, mainDatas[i].GroupId, mainDatas[i].Name)
 		}
 	}
 
-	// write to file csv
-	file_name := "data.csv"
-	file, err := os.Create(file_name)
-	if err != nil {
-		log.Println("创建文件失败:", err)
-		return
+	sepChar := "$"
+	scrapDetailData := true
+	if scrapDetailData {
+		buttonIndex := 0
+		buttonElements := iframe.MustElements(`div.el-table__fixed-body-wrapper tr.el-table__row td.el-table__cell div button.el-button`)
+		for _, buttonEl := range buttonElements {
+			// 获取其下的 span , 只取文本为"可分配产品"的按钮
+			button := buttonEl.MustElement("span")
+			if button.MustText() == "可分配产品" {
+				fmt.Printf("第 %d 行: %v %v\n", buttonIndex+1, mainDatas[buttonIndex].GroupId, mainDatas[buttonIndex].Name)
+				buttonIndex++
+
+				// if buttonIndex != 1 {
+				// 	continue
+				// }
+
+				button.MustClick()
+
+				// 如有多页的情况, 这里等待时间中手动选单页显示100, 只适合不超过100条的情况
+				// utils.Sleep(5)
+
+				iframe.MustWaitStable()
+
+				headerCells := []string{"批准文号", "分组ID", "产品编号", "产品名称", "规格", "剂型", "转换系数", "制剂单位", "产品备注", "申报企业", "中选价格（元）（制剂）", "预采购量(制剂)", "预采购量(含量))", "固定量(制剂)", "固定量(含量)", "限定量(制剂)", "限定量(含量)", "竞价结果"}
+
+				// class等于下列的div
+				// "el-table elian-el-table el-table--fit el-table--border el-table--scrollable-x el-table--enable-row-transition el-table--small"
+				detailTable := iframe.MustElement("div.el-table.elian-el-table.el-table--fit.el-table--border.el-table--scrollable-x.el-table--enable-row-transition.el-table--small")
+				detailRows := detailTable.MustElements("div.el-table__body-wrapper.is-scrolling-left table tbody > tr.el-table__row")
+				rowCellStrs := []string{}
+				for _, row := range detailRows {
+					rowCells := row.MustElements("td.el-table__cell:not(.is-hidden) div.cell")
+					cells := make([]string, len(rowCells))
+					for j, cell := range rowCells {
+						cells[j] = cell.MustText()
+					}
+
+					//fmt.Printf("  第 %d 行: %v %v\n", i+1, cells, len(cells))
+					rowCellStrs = append(rowCellStrs, strings.Join(cells, sepChar))
+				}
+
+				rightRowCells := detailTable.MustElements("div.el-table__fixed-right tr.el-table__row")
+				rightRowCellStrs := []string{}
+				for _, row := range rightRowCells {
+					rowCells := row.MustElements("td.el-table__cell:not(.is-hidden) div.cell")
+					cells := make([]string, len(rowCells))
+					for j, cell := range rowCells {
+						cells[j] = cell.MustText()
+					}
+					rightRowCellStrs = append(rightRowCellStrs, cells[0])
+				}
+
+				fmt.Println(strings.Join(headerCells, sepChar))
+				for index := 0; index < len(rowCellStrs); index++ {
+					fmt.Println(rowCellStrs[index] + sepChar + rightRowCellStrs[index])
+				}
+
+				iframe.MustElement("button.el-dialog__headerbtn i.el-dialog__close").MustClick()
+				iframe.MustWaitStable()
+			}
+		}
 	}
 
-	writer := csv.NewWriter(file)
+	// var str_rows []string
 
-	// 写入表头
-	writer.Write([]string{"品种名称;制剂规格;生产企业;历史中选药品;单位;2023年历史采购量;2024年历史采购量"})
+	// for i := 1; i <= 68; i++ {
+	// 	log.Println("表格数据抓取中, 第", i, "页")
+	// 	newFunction(page, &str_rows)
 
-	// 写入数据
-	for _, row := range str_rows {
-		writer.Write([]string{row})
-	}
-	writer.Flush()
-	file.Close()
+	// 	next_button := page.MustElementX(next_selector)
+	// 	next_button.MustClick()
+	// 	// 等待页面加载完成
+	// 	for page.MustHas(loading_selector) {
+	// 		log.Println("页面正在加载，请稍等...")
+	// 		time.Sleep(1 * time.Second) // 等待1秒后再次检查
+	// 	}
+	// }
+
+	// // write to file csv
+	// file_name := "data.csv"
+	// file, err := os.Create(file_name)
+	// if err != nil {
+	// 	log.Println("创建文件失败:", err)
+	// 	return
+	// }
+
+	// writer := csv.NewWriter(file)
+
+	// // 写入表头
+	// writer.Write([]string{"品种名称;制剂规格;生产企业;历史中选药品;单位;2023年历史采购量;2024年历史采购量"})
+
+	// // 写入数据
+	// for _, row := range str_rows {
+	// 	writer.Write([]string{row})
+	// }
+	// writer.Flush()
+	// file.Close()
 }
 
 func getSmpaaData(browser *rod.Browser, skipNav bool) {
@@ -872,7 +949,7 @@ func main() {
 			return
 		}
 
-		browser = rod.New().ControlURL(wsURL).MustConnect()
+		browser = rod.New().ControlURL(wsURL).MustConnect().NoDefaultDevice()
 		// defer browser.MustClose()
 		log.Println("✅ 已连接到已有浏览器")
 	case "3":
@@ -882,8 +959,8 @@ func main() {
 		return
 	}
 
-	reportData(browser, false)
-	//getTianJinData(browser, false)
+	//reportData(browser, false)
+	getTianJinData(browser, false)
 
 	// 命令映射
 	// commands := map[string]Command{
